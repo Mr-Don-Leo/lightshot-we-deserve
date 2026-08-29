@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -1021,6 +1021,96 @@ static OVERLAY_BARRIER: Mutex<OverlayBarrier> = Mutex::new(OverlayBarrier {
     shown: false,
 });
 
+// Which overlay owns the current selection (usize::MAX = none). Escape has to
+// reach the window the user is working in, not whichever one holds focus.
+static CLAIMED_OVERLAY: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+// Escape has to work even when the webview never took keyboard focus: Windows
+// can refuse to give focus to a background process, and then every key the
+// overlay listens for is dead and the capture traps the user. While the
+// overlay is on screen a system-wide Escape is registered and routed to ONE
+// overlay, so the layered Escape inside the webview still unwinds exactly one
+// step per press.
+static ESC_HOOK: AtomicBool = AtomicBool::new(false);
+
+fn set_escape_hook(app: &AppHandle, on: bool) {
+    let sc = match "Escape".parse::<Shortcut>() {
+        Ok(s) => s,
+        Err(e) => {
+            log(&format!("parse Escape shortcut failed: {e:?}"));
+            return;
+        }
+    };
+    let gs = app.global_shortcut();
+    if on {
+        if ESC_HOOK.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        match gs.register(sc) {
+            Ok(_) => log("overlay Escape hook registered"),
+            Err(e) => {
+                // Not fatal: the webview's own keydown still covers the case
+                // where the overlay did get focus.
+                ESC_HOOK.store(false, Ordering::SeqCst);
+                log(&format!("overlay Escape hook register failed: {e}"));
+            }
+        }
+    } else {
+        if !ESC_HOOK.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        match gs.unregister(sc) {
+            Ok(_) => log("overlay Escape hook released"),
+            Err(e) => log(&format!("overlay Escape hook unregister failed: {e}")),
+        }
+    }
+}
+
+fn overlay_under_cursor(app: &AppHandle, candidates: &[usize]) -> Option<usize> {
+    let (cx, cy) = cursor_pos()?;
+    candidates.iter().copied().find(|i| {
+        match app.get_webview_window(&overlay_label(*i)) {
+            Some(win) => match (win.outer_position(), win.outer_size()) {
+                (Ok(pos), Ok(size)) => {
+                    cx >= pos.x
+                        && cx < pos.x + size.width as i32
+                        && cy >= pos.y
+                        && cy < pos.y + size.height as i32
+                }
+                _ => false,
+            },
+            None => false,
+        }
+    })
+}
+
+// Deliver one Escape to the overlay that owns the selection (else the one under
+// the cursor, else the first visible one). Exactly one window unwinds, so a
+// press never cancels the capture on one monitor while stepping out of a tool
+// on another. Returns false when no overlay is on screen.
+fn dispatch_overlay_escape(app: &AppHandle) -> bool {
+    let (shown, ready) = {
+        let b = OVERLAY_BARRIER.lock().unwrap();
+        (b.shown, b.ready.clone())
+    };
+    if !shown || ready.is_empty() {
+        return false;
+    }
+    let claimed = CLAIMED_OVERLAY.load(Ordering::SeqCst);
+    let target = if ready.contains(&claimed) {
+        Some(claimed)
+    } else {
+        overlay_under_cursor(app, &ready).or_else(|| ready.first().copied())
+    };
+    match target {
+        Some(i) => {
+            let _ = app.emit_to(overlay_label(i), "overlay-escape", ());
+            true
+        }
+        None => false,
+    }
+}
+
 // Reveal every painted overlay of this capture at once, focusing the one under
 // the cursor. The timeout path fires even if not everyone reported, so one
 // broken monitor can't hold the rest hostage forever.
@@ -1073,6 +1163,9 @@ fn reveal_overlays(app: &AppHandle, nonce: u64, timeout: bool) {
             let _ = win.set_focus();
         }
     }
+    // set_focus can be refused by the OS; the hook is the guarantee that Escape
+    // still gets the user out of a capture they triggered by accident.
+    set_escape_hook(app, true);
 }
 
 fn show_overlay(app: &AppHandle) {
@@ -1134,6 +1227,7 @@ fn show_overlay(app: &AppHandle) {
             b.ready.clear();
             b.shown = false;
         }
+        CLAIMED_OVERLAY.store(usize::MAX, Ordering::SeqCst);
         // Every overlay stays hidden until its JS has painted its own frame
         // and called `overlay_ready`; they are then revealed together.
         let _ = app.emit("frozen-ready", ());
@@ -1147,6 +1241,10 @@ fn show_overlay(app: &AppHandle) {
 }
 
 fn hide_overlay(app: &AppHandle) {
+    // The system-wide Escape belongs to the overlay and dies with it: leaving
+    // it registered would swallow Escape for every other app on the machine.
+    set_escape_hook(app, false);
+    CLAIMED_OVERLAY.store(usize::MAX, Ordering::SeqCst);
     // Invalidate the barrier first so an in-flight load can't re-show a
     // window after the user dismissed the capture.
     {
@@ -1330,6 +1428,12 @@ fn apply_shortcuts(app: &AppHandle) {
         },
         Err(e) => log(&format!("parse full hotkey '{full_str}' failed: {e:?}")),
     }
+
+    // unregister_all above also dropped the overlay's Escape; if a capture is
+    // on screen right now (settings saved mid-capture), put it back.
+    if ESC_HOOK.swap(false, Ordering::SeqCst) {
+        set_escape_hook(app, true);
+    }
 }
 
 fn apply_autostart(app: &AppHandle, enabled: bool) {
@@ -1399,7 +1503,27 @@ fn get_frozen(state: State<AppState>, idx: usize) -> Option<FrozenInfo> {
 // dragging on one overlay, the others clear theirs.
 #[tauri::command]
 fn claim_overlay(app: AppHandle, idx: usize) {
+    CLAIMED_OVERLAY.store(idx, Ordering::SeqCst);
     let _ = app.emit("overlay-claimed", idx);
+}
+
+// The overlay asks for keyboard focus back the moment the pointer moves over
+// it. Without focus every key it listens for is dead, Escape included.
+#[tauri::command]
+fn focus_overlay(app: AppHandle, window: tauri::WebviewWindow) {
+    let _ = app.run_on_main_thread(move || {
+        let _ = window.set_focus();
+    });
+}
+
+// Escape seen by a focused overlay: route it through the same picker the
+// global hook uses, so the window that owns the selection is the one that
+// unwinds a layer.
+#[tauri::command]
+fn overlay_escape(app: AppHandle, window: tauri::WebviewWindow) {
+    if !dispatch_overlay_escape(&app) {
+        let _ = app.emit_to(window.label().to_string(), "overlay-escape", ());
+    }
 }
 
 #[tauri::command]
@@ -1818,6 +1942,16 @@ fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
+                    // Escape is only ever registered while an overlay is up.
+                    if ESC_HOOK.load(Ordering::SeqCst)
+                        && "Escape"
+                            .parse::<Shortcut>()
+                            .map(|s| &s == shortcut)
+                            .unwrap_or(false)
+                    {
+                        dispatch_overlay_escape(app);
+                        return;
+                    }
                     let state = app.state::<AppState>();
                     let is_area = state
                         .area_sc
@@ -1865,6 +1999,8 @@ fn run() {
             copy_capture,
             overlay_ready,
             claim_overlay,
+            focus_overlay,
+            overlay_escape,
             cancel_area,
             start_recording,
             stop_recording,

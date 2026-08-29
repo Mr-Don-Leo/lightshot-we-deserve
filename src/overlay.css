@@ -201,8 +201,17 @@ html, body {
 #nameBtns #nameOk { background: #2ec8c8; color: #06302f; font-weight: 600; }
 #nameBtns #nameOk:hover { background: #45d6d6; }
 
-#textinput {
+/* The typing box travels with a grab bar, so text can be lined up against
+   anything on screen while it is still being written. */
+#textwrap {
   position: fixed;
+  z-index: 25;
+  transition: box-shadow 140ms cubic-bezier(0.2, 0, 0.2, 1);
+}
+#textwrap.dragging { box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45); }
+
+#textinput {
+  display: block;
   margin: 0;
   padding: 0;
   border: 1px dashed rgba(255,255,255,0.6);
@@ -212,6 +221,43 @@ html, body {
   resize: none;
   white-space: pre;
   line-height: 1.2;
-  z-index: 25;
   font-family: system-ui, "Segoe UI", sans-serif;
+}
+
+#textgrab {
+  position: absolute;
+  left: -1px;
+  top: -20px;
+  height: 19px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border-radius: 5px 5px 0 0;
+  background: #2b2b2b;
+  color: #ddd;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: move;
+  user-select: none;
+  transition: background 140ms cubic-bezier(0.2, 0, 0.2, 1);
+}
+/* No room above the box: the bar hangs underneath instead. */
+#textwrap.below #textgrab {
+  top: 100%;
+  border-radius: 0 0 5px 5px;
+}
+#textgrab::before {
+  content: "";
+  width: 7px;
+  height: 11px;
+  /* Grip dots, drawn so the bar reads as a handle at a glance. */
+  background-image: radial-gradient(circle, #ddd 1px, transparent 1.2px);
+  background-size: 3.5px 3.7px;
+}
+#textgrab:hover, #textwrap.dragging #textgrab { background: #3d3d3d; }
+
+@media (prefers-reduced-motion: reduce) {
+  #textwrap, #textgrab { transition: none; }
 }

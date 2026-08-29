@@ -46,11 +46,26 @@ let undoable = [];         // up to 5 undoable actions
 let current = null;        // in-progress annotation
 
 let selecting = false, drawing = false, selStart = null;
+let selBefore = null;      // selection to restore if a new drag is escaped
 let moving = false, moveStart = null;  // drag the finished selection frame
 let lastMouse = { x: 0, y: 0 };  // for placing the size badge on keyboard resize
-let textInput = null, textPos = null;
+let mouseSeen = false;     // no pointer yet: the badge would land in the corner
+let textInput = null, textPos = null, textWrap = null, textDrag = null;
 let badgeTimer = null;
 let ready = false;
+let lastEsc = 0;           // dedupe: one press can arrive twice (see escapeStep)
+
+// Single-letter tool keys. The physical code is checked first so a non-Latin
+// layout still works, the letter second for remapped layouts; either way case
+// is irrelevant, so Shift+T selects text just like t.
+const TOOL_CODES = {
+  KeyP: "pen", KeyL: "line", KeyA: "arrow", KeyR: "rect",
+  KeyM: "marker", KeyT: "text", KeyB: "blur",
+};
+const TOOL_LETTERS = {
+  p: "pen", l: "line", a: "arrow", r: "rect",
+  m: "marker", t: "text", b: "blur",
+};
 
 // ---------- frozen image ----------
 
@@ -99,6 +114,8 @@ function resetState() {
   current = null;
   selecting = false;
   drawing = false;
+  moving = false;
+  selBefore = null;
   cancelText();
   setTool(null);
   hint.style.display = "";
@@ -367,26 +384,60 @@ function hideBadge() {
 
 // ---------- text tool ----------
 
+// Height reserved for the grab bar that moves the box while it is being typed.
+const TEXT_HANDLE_H = 20;
+
 function startText(pt) {
   textPos = { x: pt.x, y: pt.y };
+  // The box lives in a wrapper so the grab bar travels with it; the textarea
+  // itself stays at the wrapper's origin, which is the exact point the drawn
+  // text is anchored to.
+  const wrap = document.createElement("div");
+  wrap.id = "textwrap";
+
+  const grab = document.createElement("div");
+  grab.id = "textgrab";
+  grab.title = "Drag to move the text";
+  grab.textContent = "move";
+
   const ta = document.createElement("textarea");
   ta.id = "textinput";
-  ta.style.left = pt.x + "px";
-  ta.style.top = pt.y + "px";
   ta.style.color = color;
   ta.style.fontSize = sizes.text + "px";
   ta.rows = 1;
-  document.body.appendChild(ta);
+  wrap.appendChild(grab);
+  wrap.appendChild(ta);
+  document.body.appendChild(wrap);
+  textWrap = wrap;
   textInput = ta;
+  placeTextBox();
   autosize(ta);
   setTimeout(() => ta.focus(), 0);
   ta.addEventListener("input", () => autosize(ta));
   ta.addEventListener("blur", commitText);
   ta.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === "Escape") { e.preventDefault(); cancelText(); }
+    if (e.key === "Escape") { e.preventDefault(); if (!e.repeat) escapeStep(); }
     else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); }
   });
+  grab.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    // preventDefault keeps the caret in the textarea: a blur here would commit
+    // the text and destroy the box mid-drag.
+    e.preventDefault();
+    e.stopPropagation();
+    textDrag = { mx: e.clientX, my: e.clientY, ox: textPos.x, oy: textPos.y };
+    textWrap.classList.add("dragging");
+  });
+}
+
+// Move the box to textPos, flipping the grab bar under the box when there is
+// no room for it above.
+function placeTextBox() {
+  if (!textWrap) return;
+  textWrap.style.left = textPos.x + "px";
+  textWrap.style.top = textPos.y + "px";
+  textWrap.classList.toggle("below", textPos.y < TEXT_HANDLE_H);
 }
 
 function autosize(ta) {
@@ -401,7 +452,7 @@ function commitText() {
   const ta = textInput;
   textInput = null;
   const val = ta.value;
-  ta.remove();
+  removeTextBox();
   if (val.trim().length) {
     pushAnnotation({ type: "text", color, size: sizes.text, x: textPos.x, y: textPos.y, text: val });
   }
@@ -410,10 +461,15 @@ function commitText() {
 
 function cancelText() {
   if (!textInput) return;
-  const ta = textInput;
   textInput = null;
-  ta.remove();
+  removeTextBox();
   render();
+}
+
+function removeTextBox() {
+  textDrag = null;
+  if (textWrap) textWrap.remove();
+  textWrap = null;
 }
 
 // ---------- pointer ----------
@@ -434,6 +490,7 @@ canvas.addEventListener("mousedown", (e) => {
   if (!sel || tool === null) {
     selecting = true;
     selStart = pt;
+    selBefore = sel;          // Escape mid-drag puts this one back
     sel = { x: pt.x, y: pt.y, w: 0, h: 0 };
     hint.style.display = "none";
     // Tell the other monitors' overlays to drop their selection: only one
@@ -460,6 +517,15 @@ canvas.addEventListener("mousedown", (e) => {
 window.addEventListener("mousemove", (e) => {
   const pt = { x: e.clientX, y: e.clientY };
   lastMouse = pt;
+  mouseSeen = true;
+  ensureFocus();
+  if (textDrag && textWrap) {
+    const bw = textWrap.offsetWidth, bh = textWrap.offsetHeight;
+    textPos.x = clamp(textDrag.ox + (pt.x - textDrag.mx), 0, Math.max(0, cssW - bw));
+    textPos.y = clamp(textDrag.oy + (pt.y - textDrag.my), 0, Math.max(0, cssH - bh));
+    placeTextBox();
+    return;
+  }
   if (moving) {
     const nx = clamp(moveStart.sx + (pt.x - moveStart.x), 0, cssW - sel.w);
     const ny = clamp(moveStart.sy + (pt.y - moveStart.y), 0, cssH - sel.h);
@@ -503,6 +569,16 @@ window.addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", () => {
+  if (textDrag) {
+    textDrag = null;
+    if (textWrap) {
+      textWrap.classList.remove("dragging");
+      // The caret went untouched during the drag; put it back where the user
+      // can keep typing straight away.
+      if (textInput) textInput.focus();
+    }
+    return;
+  }
   if (moving) { moving = false; return; }
   if (selecting) {
     selecting = false;
@@ -604,7 +680,7 @@ nameModal.addEventListener("mousedown", (e) => {
 nameInput.addEventListener("keydown", (e) => {
   e.stopPropagation();
   if (e.key === "Enter") { e.preventDefault(); confirmNameSave(); }
-  else if (e.key === "Escape") { e.preventDefault(); closeNameModal(); }
+  else if (e.key === "Escape") { e.preventDefault(); escapeStep(); }
 });
 [toolbar, actionbar].forEach((p) =>
   p.addEventListener("mousedown", (e) => e.stopPropagation())
@@ -719,9 +795,73 @@ function cancel() {
 
 // ---------- keyboard ----------
 
+// Escape unwinds ONE layer per press, innermost first: the name dialog, then
+// the text being typed, then the stroke or selection under the mouse, then the
+// active tool, and only with nothing left to undo does it leave the capture.
+function escapeStep() {
+  // One press can arrive twice (the global hook fires and the webview also
+  // sees the key); a second Escape inside this window is the same press.
+  const now = performance.now();
+  if (now - lastEsc < 150) return;
+  lastEsc = now;
+
+  if (nameModal && !nameModal.classList.contains("hidden")) { closeNameModal(); return; }
+  if (textDrag) {                       // dragging the text box: drop it back
+    textPos.x = textDrag.ox;
+    textPos.y = textDrag.oy;
+    textDrag = null;
+    if (textWrap) textWrap.classList.remove("dragging");
+    placeTextBox();
+    if (textInput) textInput.focus();
+    return;
+  }
+  if (textInput) { cancelText(); return; }
+  if (drawing) { drawing = false; current = null; render(); return; }
+  if (moving) {
+    moving = false;
+    sel.x = moveStart.sx;
+    sel.y = moveStart.sy;
+    positionUI();
+    render();
+    return;
+  }
+  if (selecting) {
+    selecting = false;
+    sel = selBefore;
+    hint.style.display = sel ? "none" : "";
+    positionUI();
+    render();
+    return;
+  }
+  if (tool) { setTool(null); canvas.style.cursor = ""; return; }
+  cancel();
+}
+
 window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" || e.code === "Escape") {
+    e.preventDefault();
+    // A held Escape must not blow through every layer at once.
+    if (e.repeat) return;
+    // Routed through the backend so the overlay holding the selection is the
+    // one that unwinds, even when a different monitor's window has focus.
+    invoke("overlay_escape").catch(() => escapeStep());
+    return;
+  }
   if (textInput) return; // textarea handles its own keys
-  if (e.key === "Escape" || e.code === "Escape") { e.preventDefault(); cancel(); return; }
+  if (nameModal && !nameModal.classList.contains("hidden")) return;
+  // Single letters pick a tool: P pen, L line, A arrow, R rect, M marker,
+  // T text, B blur. Pressing the active tool's letter again drops back to
+  // plain selection.
+  if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+    const t = TOOL_CODES[e.code] || TOOL_LETTERS[(e.key || "").toLowerCase()];
+    if (t && sel && !selecting && !drawing && !moving) {
+      e.preventDefault();
+      setTool(tool === t ? null : t);
+      canvas.style.cursor = "";
+      if (mouseSeen) showBadge(lastMouse.x, lastMouse.y);
+      return;
+    }
+  }
   // Resize the active tool from the keyboard (works on any laptop, no scroll
   // needed): +/= grows, -/_ shrinks, and [ ] do the same.
   if (tool && !e.ctrlKey && !e.metaKey) {
@@ -751,6 +891,20 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("contextmenu", (e) => e.preventDefault());
 window.addEventListener("resize", resize);
 
+// ---------- focus ----------
+
+// An overlay the OS never handed keyboard focus to swallows every shortcut,
+// Escape first. The moment the pointer is over this window, take focus back.
+let focusAsk = 0;
+function ensureFocus() {
+  if (!ready || document.hasFocus()) return;
+  const now = performance.now();
+  if (now - focusAsk < 400) return;
+  focusAsk = now;
+  invoke("focus_overlay").catch(() => {});
+}
+window.addEventListener("mousedown", ensureFocus, true);
+
 // ---------- init ----------
 
 // Another monitor's overlay took the selection: clear ours but keep showing
@@ -765,6 +919,7 @@ function clearLocal() {
   selecting = false;
   drawing = false;
   moving = false;
+  selBefore = null;
   cancelText();
   setTool(null);
   hint.style.display = "";
@@ -780,5 +935,9 @@ if (listen) {
   listen("overlay-claimed", (e) => {
     if (e.payload !== IDX) clearLocal();
   });
+  // Escape reaching us from the backend: either the system-wide hook (this
+  // window never got focus) or another overlay handing it to the one that
+  // owns the selection.
+  listen("overlay-escape", () => escapeStep());
 }
 loadFrozen();
