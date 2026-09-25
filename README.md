@@ -28,7 +28,9 @@ Grab the latest build from the [Releases page](https://github.com/Mr-Don-Leo/lig
 
 ### Linux
 
-- **`.AppImage`** — portable, works on most distros: `chmod +x` it and run.
+- **`.AppImage`** — portable: `chmod +x` it and run. Built on Ubuntu 24.04, so
+  it needs a distro of that era or newer (glibc 2.39+); older distros should
+  build from source.
 - **`.deb`** (Debian/Ubuntu) and **`.rpm`** (Fedora/openSUSE) packages.
 - The tray icon needs an AppIndicator-capable tray (GNOME users: install the
   AppIndicator extension).
