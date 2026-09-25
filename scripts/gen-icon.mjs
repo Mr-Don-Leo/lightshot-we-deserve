@@ -100,6 +100,29 @@ function makeIco(size) {
   return Buffer.concat([header, entry, png]);
 }
 
+// macOS menu-bar "template" icon: monochrome, shape carried by the alpha
+// channel only — macOS recolors it to match light/dark appearance. Same
+// aperture-ring + crosshair mark as the app icon, without the background.
+function drawTray(size) {
+  const buf = Buffer.alloc(size * size * 4);
+  const cx = size / 2, cy = size / 2;
+  const ringOuter = size * 0.32, ringInner = size * 0.21;
+  const cross = size * 0.46, crossW = Math.max(1, size * 0.055);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4;
+      const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+      const onRing = d <= ringOuter && d >= ringInner;
+      const onV = Math.abs(x + 0.5 - cx) <= crossW && Math.abs(y + 0.5 - cy) <= cross;
+      const onH = Math.abs(y + 0.5 - cy) <= crossW && Math.abs(x + 0.5 - cx) <= cross;
+      // black + full alpha where the mark is; fully transparent elsewhere
+      buf[i] = buf[i + 1] = buf[i + 2] = 0;
+      buf[i + 3] = onRing || onV || onH ? 255 : 0;
+    }
+  }
+  return buf;
+}
+
 // ICNS container: "icns" magic + big-endian total length, then entries of
 // OSType + length + payload. Modern OSTypes accept raw PNG payloads.
 function makeIcns() {
@@ -131,3 +154,5 @@ writeFileSync(join(OUT, "icon.ico"), makeIco(256));
 console.log("wrote icon.ico");
 writeFileSync(join(OUT, "icon.icns"), makeIcns());
 console.log("wrote icon.icns");
+writeFileSync(join(OUT, "tray-macTemplate@2x.png"), encodePng(44, drawTray(44)));
+console.log("wrote tray-macTemplate@2x.png");

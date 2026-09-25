@@ -1910,6 +1910,20 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         });
 
+    // macOS wants a monochrome "template" image in the menu bar so the icon
+    // recolors itself for light/dark appearance; elsewhere the colored app
+    // icon reads better.
+    #[cfg(target_os = "macos")]
+    match tauri::image::Image::from_bytes(include_bytes!("../icons/tray-macTemplate@2x.png")) {
+        Ok(img) => builder = builder.icon(img).icon_as_template(true),
+        Err(e) => {
+            log(&format!("tray template icon failed ({e}); using app icon"));
+            if let Some(icon) = app.default_window_icon() {
+                builder = builder.icon(icon.clone());
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
