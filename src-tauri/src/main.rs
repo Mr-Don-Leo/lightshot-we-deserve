@@ -144,7 +144,10 @@ struct FrozenInfo {
     nonce: u64,
     x: i32,
     y: i32,
-    url: String,
+    // Some(url) = load over the custom protocol (Windows/WebView2). None =
+    // WebKit platform; the overlay pulls raw bytes via get_frozen_bytes
+    // instead, because WebKit rejects CORS-mode loads from custom schemes.
+    url: Option<String>,
     width: u32,
     height: u32,
 }
@@ -235,11 +238,16 @@ fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
 }
 
 fn primary_monitor() -> Result<xcap::Monitor, String> {
-    let monitors = xcap::Monitor::all().map_err(|e| format!("Monitor::all failed: {e}"))?;
+    let mut monitors = xcap::Monitor::all().map_err(|e| format!("Monitor::all failed: {e}"))?;
+    // Some X11 setups never flag a primary monitor; fall back to the first
+    // one rather than refusing to capture.
+    if let Some(pos) = monitors.iter().position(|m| m.is_primary().unwrap_or(false)) {
+        return Ok(monitors.swap_remove(pos));
+    }
     monitors
         .into_iter()
-        .find(|m| m.is_primary().unwrap_or(false))
-        .ok_or_else(|| "no primary monitor found".to_string())
+        .next()
+        .ok_or_else(|| "no monitors found".to_string())
 }
 
 // Bounding box of the whole virtual desktop (all monitors) in physical px:
@@ -1296,7 +1304,13 @@ fn create_indicator_windows(app: &AppHandle) {
             .build()
         {
             Ok(win) => {
+                // On Linux this must wait until the window has been shown:
+                // tao's GTK backend panics on hidden windows (no GdkWindow
+                // yet). show_record_ui() applies it after show() there.
+                #[cfg(not(target_os = "linux"))]
                 let _ = win.set_ignore_cursor_events(true);
+                #[cfg(target_os = "linux")]
+                let _ = win;
                 log("recborder window created");
             }
             Err(e) => log(&format!("recborder build failed: {e}")),
@@ -1359,8 +1373,12 @@ fn show_record_ui(app: &AppHandle, ax: i32, ay: i32, w: u32, h: u32) {
         if let Some(win) = app.get_webview_window("recborder") {
             let _ = win.set_position(PhysicalPosition::new(bx, by));
             let _ = win.set_size(PhysicalSize::new(bw, bh));
+            #[cfg(not(target_os = "linux"))]
             let _ = win.set_ignore_cursor_events(true);
             let _ = win.show();
+            // Linux: only safe once the GTK window is realized (post-show).
+            #[cfg(target_os = "linux")]
+            let _ = win.set_ignore_cursor_events(true);
             log("record border shown");
         } else {
             log("recborder window missing");
@@ -1500,12 +1518,17 @@ fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> 
 
 #[tauri::command]
 fn get_frozen(state: State<AppState>, idx: usize) -> Option<FrozenInfo> {
+    log(&format!("get_frozen requested for overlay {idx}"));
     let guard = state.frozen.lock().unwrap();
     let f = guard.as_ref()?;
     let s = f.shots.get(idx)?;
+    #[cfg(windows)]
+    let url = Some(format!("http://frozen.localhost/{}/{idx}.bmp", f.nonce));
+    #[cfg(not(windows))]
+    let url = None;
     Some(FrozenInfo {
         nonce: f.nonce,
-        url: format!("http://frozen.localhost/{}/{idx}.bmp", f.nonce),
+        url,
         x: s.x,
         y: s.y,
         width: s.width,
@@ -1579,6 +1602,36 @@ fn copy_capture(app: AppHandle, request: tauri::ipc::Request) -> Result<(), Stri
     log("copied area screenshot to clipboard");
     hide_overlay(&app);
     Ok(())
+}
+
+// Lets the webviews drop a line into the app log — without this, JS-side
+// failures on end-user machines are invisible.
+#[tauri::command]
+fn js_log(window: tauri::WebviewWindow, msg: String) {
+    log(&format!("[{}] {msg}", window.label()));
+}
+
+// Raw RGBA pixels of one frozen monitor frame, sent over IPC for the WebKit
+// platforms (see FrozenInfo.url) — WebKitGTK stalls decoding our 32-bit BMPs,
+// so the overlay paints raw pixels via ImageData instead of an <img>. The
+// nonce guards against a stale request from a dismissed/replaced capture.
+#[tauri::command]
+fn get_frozen_bytes(
+    state: State<AppState>,
+    idx: usize,
+    nonce: u64,
+) -> Result<tauri::ipc::Response, String> {
+    let guard = state.frozen.lock().unwrap();
+    let f = guard.as_ref().ok_or("no frozen capture")?;
+    if f.nonce != nonce {
+        return Err("stale capture nonce".into());
+    }
+    let s = f.shots.get(idx).ok_or("no shot for this overlay")?;
+    let img = image::load_from_memory(&s.bytes)
+        .map_err(|e| format!("frozen decode failed: {e}"))?;
+    let raw = img.to_rgba8().into_raw();
+    log(&format!("get_frozen_bytes: sending {} raw px bytes for overlay {idx}", raw.len()));
+    Ok(tauri::ipc::Response::new(raw))
 }
 
 #[tauri::command]
@@ -1938,6 +1991,7 @@ fn run() {
     log("=== lightshot-we-deserve launching ===");
     tauri::Builder::default()
         .register_uri_scheme_protocol("frozen", |ctx, req| {
+            log(&format!("frozen protocol request: {}", req.uri()));
             let app = ctx.app_handle();
             let guard = app.state::<AppState>();
             let frozen = guard.frozen.lock().unwrap();
@@ -2023,6 +2077,8 @@ fn run() {
             get_settings,
             save_settings,
             get_frozen,
+            get_frozen_bytes,
+            js_log,
             save_capture,
             copy_capture,
             overlay_ready,

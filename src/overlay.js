@@ -26,6 +26,9 @@ const sizeVal = document.getElementById("sizeVal");
 const COLORS = ["#e7402e", "#e67e22", "#f1c40f", "#2ecc71", "#3498db", "#9b59b6", "#000000", "#ffffff"];
 
 const frozenImg = new Image();
+// What actually gets drawn: the <img> on the URL path (Windows), or a canvas
+// holding raw pixels on the IPC path (WebKit). Null until a frame is loaded.
+let frozenSrc = null;
 let frozenNatW = 0, frozenNatH = 0;
 let frozenX = 0, frozenY = 0;  // this monitor's origin in virtual-desktop px
 let cssW = 0, cssH = 0, dpr = 1, sx = 1, sy = 1;
@@ -79,16 +82,44 @@ function clearCanvasHard() {
 async function loadFrozen() {
   ready = false;
   clearCanvasHard();           // wipe any leftover frame from a previous capture
+  frozenSrc = null;
   let shot;
   try { shot = await invoke("get_frozen", { idx: IDX }); } catch (_) { return; }
   // No shot for this window (fewer monitors than windows): stay hidden.
   if (!shot) return;
-  const ok = await new Promise((res) => {
-    frozenImg.onload = () => res(true);
-    frozenImg.onerror = () => res(false);
-    frozenImg.crossOrigin = "anonymous"; // keep the canvas untainted for export
-    frozenImg.src = shot.url;
-  });
+  let ok;
+  if (shot.url) {
+    // Windows/WebView2: load straight off the custom protocol.
+    ok = await new Promise((res) => {
+      frozenImg.onload = () => { frozenSrc = frozenImg; res(true); };
+      frozenImg.onerror = () => res(false);
+      frozenImg.crossOrigin = "anonymous"; // keep the canvas untainted for export
+      frozenImg.src = shot.url;
+    });
+  } else {
+    // WebKit (Linux/macOS) can't load our custom-scheme/BMP frames reliably,
+    // so the frame arrives as raw RGBA over IPC and is painted into a canvas
+    // — no image decoder involved, and same-origin so exports stay untainted.
+    ok = await (async () => {
+      try {
+        const buf = await invoke("get_frozen_bytes", { idx: IDX, nonce: shot.nonce });
+        const px = new Uint8ClampedArray(buf);
+        if (px.length !== shot.width * shot.height * 4) {
+          invoke("js_log", { msg: `frozen pixel size mismatch: got ${px.length}` }).catch(() => {});
+          return false;
+        }
+        const c = document.createElement("canvas");
+        c.width = shot.width;
+        c.height = shot.height;
+        c.getContext("2d").putImageData(new ImageData(px, shot.width, shot.height), 0, 0);
+        frozenSrc = c;
+        return true;
+      } catch (e) {
+        invoke("js_log", { msg: `get_frozen_bytes failed: ${e}` }).catch(() => {});
+        return false;
+      }
+    })();
+  }
   // A failed load must NOT report ready: showing this window would present a
   // blank monitor. The backend's barrier timeout reveals the others.
   if (!ok) return;
@@ -96,9 +127,17 @@ async function loadFrozen() {
   frozenNatH = shot.height;
   frozenX = shot.x;
   frozenY = shot.y;
-  resetState();
-  ready = true;
-  resize();
+  // A paint hiccup here (e.g. the window has no size yet because it was
+  // never mapped) must not block the ready report: the frame data IS loaded,
+  // and the resize listener repaints once the window is shown.
+  try {
+    resetState();
+    ready = true;
+    resize();
+  } catch (e) {
+    ready = true;
+    invoke("js_log", { msg: `post-load paint failed (will repaint on resize): ${e}` }).catch(() => {});
+  }
   // Frame is painted; report in with the capture id so a stale load (user
   // already hit Escape, or a newer capture replaced this one) is ignored.
   invoke("overlay_ready", { nonce: shot.nonce }).catch(() => {});
@@ -146,12 +185,14 @@ function resize() {
 // resolution. render() then just copies this in one fast blit per frame.
 function buildBackground() {
   bgReady = false;
-  if (!ready || !frozenImg.complete || !frozenNatW) return;
+  // cssW/cssH are 0 while the window has never been mapped (hidden GTK
+  // windows report no size); the resize listener repaints after reveal.
+  if (!ready || !frozenSrc || !frozenNatW || cssW <= 0 || cssH <= 0) return;
   bgCanvas.width = Math.round(cssW * dpr);
   bgCanvas.height = Math.round(cssH * dpr);
   bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   bgCtx.clearRect(0, 0, cssW, cssH);
-  bgCtx.drawImage(frozenImg, 0, 0, cssW, cssH);
+  bgCtx.drawImage(frozenSrc, 0, 0, cssW, cssH);
   bgCtx.fillStyle = "rgba(0,0,0,0.45)";
   bgCtx.fillRect(0, 0, cssW, cssH);
   bgReady = true;
@@ -171,12 +212,13 @@ function insideSel(pt) {
 
 function render() {
   ctx.clearRect(0, 0, cssW, cssH);
-  if (!ready || !frozenImg.complete || !frozenNatW) return;
+  if (!ready || !frozenSrc || !frozenNatW) return;
   if (!bgReady) buildBackground();
+  if (!bgReady) return; // zero-size window: nothing to paint yet
   ctx.drawImage(bgCanvas, 0, 0, cssW, cssH);
 
   if (sel) {
-    ctx.drawImage(frozenImg, sel.x * sx, sel.y * sy, sel.w * sx, sel.h * sy, sel.x, sel.y, sel.w, sel.h);
+    ctx.drawImage(frozenSrc, sel.x * sx, sel.y * sy, sel.w * sx, sel.h * sy, sel.x, sel.y, sel.w, sel.h);
     // Annotations are NOT clipped to the selection — the user can draw outside
     // it (those strokes just won't end up in the cropped screenshot).
     drawAnnotations(ctx, committed.concat(undoable));
@@ -695,7 +737,7 @@ function exportCanvas() {
   full.width = frozenNatW;
   full.height = frozenNatH;
   const fx = full.getContext("2d");
-  fx.drawImage(frozenImg, 0, 0, frozenNatW, frozenNatH);
+  fx.drawImage(frozenSrc, 0, 0, frozenNatW, frozenNatH);
   fx.save();
   fx.scale(sx, sy);            // annotations are stored in css px
   drawAnnotations(fx, committed.concat(undoable));
