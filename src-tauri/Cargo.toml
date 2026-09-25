@@ -1,6 +1,6 @@
 [package]
 name = "lightshot-we-deserve"
-version = "1.1.0"
+version = "1.2.0"
 description = "The Lightshot we deserve - a clean screenshot tool"
 authors = ["manager <alexanyanwolf@gmail.com>"]
 edition = "2021"
@@ -22,6 +22,11 @@ arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_RemoteDesktop"] }
+
+# Transparent overlay windows on macOS require the private-API feature
+# (paired with "macOSPrivateApi": true in tauri.macos.conf.json).
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
 
 [profile.release]
 panic = "abort"

@@ -2617,10 +2617,9 @@ dependencies = [
 
 [[package]]
 name = "lightshot-we-deserve"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "arboard",
- "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "image",
@@ -2630,6 +2629,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-global-shortcut",
+ "windows-sys 0.59.0",
  "xcap",
 ]
 

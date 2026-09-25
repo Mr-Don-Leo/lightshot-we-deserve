@@ -1,17 +1,40 @@
 # Lightshot We Deserve
 
-A clean, open-source screenshot tool for Windows. It lives in the system tray
-and gives you global hotkeys for area and full-screen capture — then lets you
-annotate, copy, or save in one move. No accounts, no upload servers, no clutter.
+A clean, open-source screenshot tool for Windows, macOS, and Linux. It lives
+in the system tray and gives you global hotkeys for area and full-screen
+capture — then lets you annotate, copy, or save in one move. No accounts, no
+upload servers, no clutter.
 
 Built by the team at **[keepsimple.io](https://keepsimple.io)**.
 
 ## Download
 
-Grab the latest build from the [Releases page](https://github.com/manager/lightshot-we-deserve/releases/latest):
+Grab the latest build from the [Releases page](https://github.com/Mr-Don-Leo/lightshot-we-deserve/releases/latest):
 
-- **Portable** — [`lightshot-we-deserve.exe`](https://github.com/manager/lightshot-we-deserve/releases/latest/download/lightshot-we-deserve.exe) · run it directly, no install.
-- **Installer** — `Lightshot.We.Deserve_..._x64-setup.exe` on the [Releases page](https://github.com/manager/lightshot-we-deserve/releases/latest) · sets up the app and optional autostart.
+### Windows
+
+- **Portable** — `lightshot-we-deserve.exe` · run it directly, no install.
+- **Installer** — `Lightshot.We.Deserve_..._x64-setup.exe` · sets up the app and optional autostart.
+
+### macOS
+
+- **`Lightshot.We.Deserve_..._universal.dmg`** — one image for both Apple Silicon and Intel Macs.
+- The app is not code-signed, so on first launch macOS may report it as damaged.
+  Clear the quarantine flag once after copying it to Applications:
+  `xattr -cr "/Applications/Lightshot We Deserve.app"`
+- macOS will ask for **Screen Recording** permission on first capture
+  (System Settings → Privacy & Security → Screen Recording).
+- Video recording needs `ffmpeg` (e.g. `brew install ffmpeg`); screenshots work without it.
+
+### Linux
+
+- **`.AppImage`** — portable, works on most distros: `chmod +x` it and run.
+- **`.deb`** (Debian/Ubuntu) and **`.rpm`** (Fedora/openSUSE) packages.
+- The tray icon needs an AppIndicator-capable tray (GNOME users: install the
+  AppIndicator extension).
+- Global hotkeys work on X11; on Wayland they depend on the compositor and may
+  be unavailable — the tray menu always works.
+- Video recording needs `ffmpeg` from your package manager; screenshots work without it.
 
 ## Features
 
@@ -36,16 +59,19 @@ Hotkeys and save folder can be changed in the app settings.
 
 ## Build from source
 
-Built with [Tauri](https://tauri.app) (Rust + WebView2). On Windows with the
-Rust toolchain and Node installed:
+Built with [Tauri](https://tauri.app). With the Rust toolchain and Node
+installed:
 
 ```
 npm install
 npm run tauri build
 ```
 
-The Windows installer and portable `.exe` are produced under
-`src-tauri/target/release/`.
+Bundles land under `src-tauri/target/release/bundle/` (NSIS installer on
+Windows, dmg on macOS, deb/rpm/AppImage on Linux). On Linux you need the
+usual Tauri build deps plus pipewire and clang headers — see the
+`Install Linux system deps` step in `.github/workflows/build.yml` for the
+exact package list.
 
 ## License
 

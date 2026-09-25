@@ -100,6 +100,28 @@ function makeIco(size) {
   return Buffer.concat([header, entry, png]);
 }
 
+// ICNS container: "icns" magic + big-endian total length, then entries of
+// OSType + length + payload. Modern OSTypes accept raw PNG payloads.
+function makeIcns() {
+  const types = {
+    icp4: 16, icp5: 32, ic07: 128, ic08: 256, ic09: 512,
+    ic10: 1024, ic11: 32, ic12: 64, ic13: 256, ic14: 512,
+  };
+  const entries = [];
+  for (const [type, size] of Object.entries(types)) {
+    const png = encodePng(size, draw(size));
+    const head = Buffer.alloc(8);
+    head.write(type, 0, "ascii");
+    head.writeUInt32BE(8 + png.length, 4);
+    entries.push(head, png);
+  }
+  const body = Buffer.concat(entries);
+  const header = Buffer.alloc(8);
+  header.write("icns", 0, "ascii");
+  header.writeUInt32BE(8 + body.length, 4);
+  return Buffer.concat([header, body]);
+}
+
 const sizes = { "32x32.png": 32, "128x128.png": 128, "128x128@2x.png": 256, "icon.png": 512 };
 for (const [name, s] of Object.entries(sizes)) {
   writeFileSync(join(OUT, name), encodePng(s, draw(s)));
@@ -107,3 +129,5 @@ for (const [name, s] of Object.entries(sizes)) {
 }
 writeFileSync(join(OUT, "icon.ico"), makeIco(256));
 console.log("wrote icon.ico");
+writeFileSync(join(OUT, "icon.icns"), makeIcns());
+console.log("wrote icon.icns");

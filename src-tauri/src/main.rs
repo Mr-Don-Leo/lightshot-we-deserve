@@ -771,11 +771,18 @@ fn quality_params(q: &str) -> (u32, u32, Option<String>) {
     }
 }
 
-// ffmpeg is shipped next to the app (bundled resource). Fall back to the exe
-// folder, then to a PATH lookup so a dev machine with ffmpeg installed works.
+// ffmpeg is shipped next to the app on Windows (bundled resource). Fall back
+// to the exe folder, then to a PATH lookup so a machine with ffmpeg installed
+// works. macOS GUI apps don't inherit the shell PATH, so probe the usual
+// Homebrew/MacPorts prefixes explicitly.
+#[cfg(windows)]
+const FFMPEG_BIN: &str = "ffmpeg.exe";
+#[cfg(not(windows))]
+const FFMPEG_BIN: &str = "ffmpeg";
+
 fn resolve_ffmpeg(app: &AppHandle) -> PathBuf {
     if let Ok(res) = app.path().resource_dir() {
-        for cand in [res.join("binaries").join("ffmpeg.exe"), res.join("ffmpeg.exe")] {
+        for cand in [res.join("binaries").join(FFMPEG_BIN), res.join(FFMPEG_BIN)] {
             if cand.is_file() {
                 return cand;
             }
@@ -783,10 +790,17 @@ fn resolve_ffmpeg(app: &AppHandle) -> PathBuf {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let cand = dir.join("ffmpeg.exe");
+            let cand = dir.join(FFMPEG_BIN);
             if cand.is_file() {
                 return cand;
             }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    for cand in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg"] {
+        let cand = PathBuf::from(cand);
+        if cand.is_file() {
+            return cand;
         }
     }
     PathBuf::from("ffmpeg")
@@ -2008,6 +2022,9 @@ fn run() {
             close_settings
         ])
         .setup(|app| {
+            // Tray-only app: keep it out of the macOS Dock and app switcher.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
             app.manage(AppState {
                 settings: Mutex::new(load_settings()),
