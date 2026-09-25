@@ -28,10 +28,12 @@ Grab the latest build from the [Releases page](https://github.com/Mr-Don-Leo/lig
 
 ### Linux
 
-- **`.AppImage`** — portable: `chmod +x` it and run. Built on Ubuntu 24.04, so
-  it needs a distro of that era or newer (glibc 2.39+); older distros should
-  build from source.
-- **`.deb`** (Debian/Ubuntu) and **`.rpm`** (Fedora/openSUSE) packages.
+- **`.deb`** (Debian/Ubuntu) and **`.rpm`** (Fedora/openSUSE) — recommended.
+  These use your distro's own WebKit, which is the most reliable setup.
+- **`.AppImage`** — portable: `chmod +x` it and run. It carries Ubuntu 24.04's
+  WebKit inside, so it's best on Ubuntu-family distros (and needs glibc 2.39+);
+  on Fedora/openSUSE prefer the `.rpm`. If windows stay blank on NVIDIA,
+  launch with `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
 - The tray icon needs an AppIndicator-capable tray (GNOME users: install the
   AppIndicator extension).
 - Global hotkeys work on X11; on Wayland they depend on the compositor and may
